@@ -1,0 +1,19 @@
+# OpenEffect config
+enabled: []
+
+# ===== 表示更新 =====
+updateTicks: 1           # 毎tickで滑らか追従
+updateOnMove: true       # 動いた瞬間にも即追従
+
+# ===== 位置（プレイヤー基準）=====
+offsetRight:   0.00      # 横のずらし（+で右）
+offsetForward: 0.00      # 前後のずらし（+で前）
+
+# 赤枠（表示領域）設定：上端から下方向へ積む
+box:
+  topUp: 1.90            # 頭からの上方向オフセット（上端の高さ）
+  step: 0.22             # 1行ごとに下げる間隔（値を小さくすると赤枠が“詰まる”）
+
+# ===== 表示 =====
+showPlayerName: false
+language: ja
