@@ -1,5 +1,7 @@
 # OpenEffect (Paper Plugin) — v1.1.1
 
+dev by PIARIS,nanosize
+
 プレイヤーに付与されている**ポーション効果**を、
 - **管理GUI**（Chest GUI）から他プレイヤーの **現在の効果一覧**を閲覧
 - **管理者のみ**が自分の **頭上表示 (TextDisplay)** / **HUD(ActionBar)** を切り替え  
