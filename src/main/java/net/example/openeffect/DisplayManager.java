@@ -4,156 +4,135 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
-import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.Display.Billboard;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.TextDisplay;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.util.Vector;
 
 import java.util.*;
 
 /**
- * 行ごとに ArmorStand を使用し、上端(Top)から下方向へ積む。
- * 再生成時に viewer 可視性を必ず再適用（showEntity/hideEntity）。
+ * TextDisplay を使ってプレイヤー頭上に複数行の効果一覧を表示する。
+ * - 1プレイヤーにつき TextDisplay を1体だけ保持（複数行は \n でまとめる）
+ * - viewer ごとの showEntity/hideEntity を毎回再適用（トグルや再生成に強い）
+ * - setText(Component) と setText(String) の両APIに自動対応（リフレクション）
+ * - オフラインになったターゲットの表示は即 remove（残留バグ対策）
  */
 public class DisplayManager {
 
     private final OpenEffectPlugin core;
 
-    // targetUUID -> 行ごとのArmorStand
-    private final Map<UUID, List<ArmorStand>> displays = new HashMap<>();
-    // 直近の描画内容（変化検知）
-    private final Map<UUID, List<String>> lastLines = new HashMap<>();
+    // targetUUID -> TextDisplay
+    private final Map<UUID, TextDisplay> displays = new HashMap<>();
+    // 直近の描画内容（変化検知用）
+    private final Map<UUID, String> lastText = new HashMap<>();
 
     // config
     private final double offRight, offForward;
-    private final double topUp;     // 上端の高さ
-    private final double stepDown;  // 下方向の行間
+    private final double topUp;      // 上端の高さ
     private final boolean showPlayerName;
     private final String language;
 
     public DisplayManager(OpenEffectPlugin plugin) {
         this.core = plugin;
         var cfg = plugin.getConfig();
-        this.offRight    = cfg.getDouble("offsetRight",   0.0);
-        this.offForward  = cfg.getDouble("offsetForward", 0.0);
-        this.topUp       = cfg.getDouble("box.topUp",     1.90);
-        this.stepDown    = cfg.getDouble("box.step",      0.22);
+        this.offRight       = cfg.getDouble("offsetRight",   0.0);
+        this.offForward     = cfg.getDouble("offsetForward", 0.0);
+        this.topUp          = cfg.getDouble("box.topUp",     1.90);
         this.showPlayerName = cfg.getBoolean("showPlayerName", false);
-        this.language    = cfg.getString("language", "ja");
+        this.language       = cfg.getString("language", "ja");
     }
 
     // --- 管理 ---
     public void ensureAllTargets() {
         for (Player p : Bukkit.getOnlinePlayers()) ensureTarget(p);
+        // ついでにオフライン掃除（残留防止）
+        removeOfflineTargets();
     }
 
     public void ensureTarget(Player target) {
-        displays.computeIfAbsent(target.getUniqueId(), k -> new ArrayList<>());
-        lastLines.computeIfAbsent(target.getUniqueId(), k -> new ArrayList<>());
-        if (displays.get(target.getUniqueId()).isEmpty()) {
-            ArmorStand as = spawnLine(target, 0);
-            displays.get(target.getUniqueId()).add(as);
-            reapplyVisibilityFor(as);
-        }
+        if (target == null || !target.isOnline()) return;
+        displays.computeIfAbsent(target.getUniqueId(), k -> {
+            TextDisplay td = spawnDisplay(target);
+            reapplyVisibilityFor(td);
+            return td;
+        });
+        lastText.putIfAbsent(target.getUniqueId(), "");
     }
 
     public void removeTarget(UUID targetId) {
-        removeAllLines(targetId);
-        displays.remove(targetId);
-        lastLines.remove(targetId);
+        TextDisplay td = displays.remove(targetId);
+        if (td != null && !td.isDead()) td.remove();     // ← 実体を確実に消す
+        lastText.remove(targetId);
     }
 
     public void despawnAll() {
-        for (UUID id : new ArrayList<>(displays.keySet())) removeAllLines(id);
+        for (TextDisplay td : displays.values()) {
+            if (td != null && !td.isDead()) td.remove();
+        }
         displays.clear();
-        lastLines.clear();
+        lastText.clear();
     }
 
-    private void removeAllLines(UUID id) {
-        List<ArmorStand> list = displays.get(id);
-        if (list != null) {
-            for (ArmorStand as : list) if (as != null && !as.isDead()) as.remove();
-            list.clear();
+    private void removeOfflineTargets() {
+        for (UUID id : new ArrayList<>(displays.keySet())) {
+            if (Bukkit.getPlayer(id) == null) {
+                removeTarget(id);                         // ← 残留バグの本丸
+            }
         }
     }
 
     // --- 更新 ---
     public void updateAll() {
         for (Player target : Bukkit.getOnlinePlayers()) updateOne(target);
-        displays.keySet().removeIf(id -> Bukkit.getPlayer(id) == null);
-        lastLines.keySet().removeIf(id -> Bukkit.getPlayer(id) == null);
+        removeOfflineTargets();                           // ← 定期掃除
     }
 
     public void updateOne(Player target) {
         if (target == null || !target.isOnline()) return;
 
+        ensureTarget(target);
+
         List<String> lines = buildEffectLines(target);
+        String joined = String.join("\n", lines);
         UUID id = target.getUniqueId();
 
-        if (!lines.equals(lastLines.getOrDefault(id, Collections.emptyList()))) {
-            // 内容が変わった→作り直し（ゴースト/上書き不具合回避）
-            removeAllLines(id);
-            List<ArmorStand> list = displays.computeIfAbsent(id, k -> new ArrayList<>());
-            for (int i = 0; i < lines.size(); i++) {
-                ArmorStand as = spawnLine(target, i);
-                as.customName(Component.text(lines.get(i)));
-                list.add(as);
-                reapplyVisibilityFor(as); // 新規行に可視性適用
-            }
-            lastLines.put(id, new ArrayList<>(lines));
-        } else {
-            // 位置だけ追従
-            List<ArmorStand> list = displays.get(id);
-            if (list != null) {
-                for (int i = 0; i < list.size(); i++) {
-                    ArmorStand as = list.get(i);
-                    if (as == null || as.isDead()) continue;
-                    as.teleport(linePos(target, i));
-                }
-            }
+        TextDisplay td = displays.get(id);
+        if (td == null || td.isDead()) {
+            td = spawnDisplay(target);
+            displays.put(id, td);
+            reapplyVisibilityFor(td);
+            lastText.put(id, "");
         }
+
+        if (!joined.equals(lastText.getOrDefault(id, ""))) {
+            setTextCompat(td, joined);
+            lastText.put(id, joined);
+        }
+
+        // 位置追従
+        td.teleport(textPos(target));
     }
 
-    /** viewer 単位の show/hide を即反映（ON/OFFトグル対応） */
+    /** viewer 単位の show/hide を即反映 */
     public void applyVisibility(Player viewer, boolean show) {
-        for (List<ArmorStand> list : displays.values()) {
-            for (ArmorStand as : list) {
-                if (as == null || as.isDead()) continue;
-                if (show) viewer.showEntity(core, as);
-                else viewer.hideEntity(core, as);
-            }
+        for (TextDisplay td : displays.values()) {
+            if (td == null || td.isDead()) continue;
+            if (show) viewer.showEntity(core, td);
+            else viewer.hideEntity(core, td);
         }
     }
 
-    private void reapplyVisibilityFor(ArmorStand as) {
+    private void reapplyVisibilityFor(TextDisplay td) {
         for (Player v : Bukkit.getOnlinePlayers()) {
-            if (core.canUse(v)) v.showEntity(core, as);
-            else v.hideEntity(core, as);
+            if (core.canSeeOverhead(v)) v.showEntity(core, td);
+            else v.hideEntity(core, td);
         }
     }
 
-    // --- 位置計算：上端(Top)から下方向へ積む ---
-    private Location linePos(Player target, int index) {
-        Location top = topPos(target);                // 上端
-        return top.add(0, -stepDown * index, 0);      // 下に向かって index 行分下げる
-    }
-
-    private ArmorStand spawnLine(Player target, int index) {
-        Location pos = linePos(target, index);
-        World w = target.getWorld();
-        return w.spawn(pos, ArmorStand.class, ent -> {
-            ent.setMarker(true);
-            ent.setInvisible(true);
-            ent.setSilent(true);
-            ent.setGravity(false);
-            ent.setCustomNameVisible(true);
-            ent.customName(Component.text(""));
-            ent.setVisibleByDefault(false); // viewer単位で制御
-        });
-    }
-
-    /** 上端（赤枠の上辺）の基準位置 */
-    private Location topPos(Player target) {
+    // --- 位置計算 ---
+    private Location textPos(Player target) {
         Location eye = target.getEyeLocation();
         Vector right = rightOf(eye);
         Vector fwd   = forwardFlat(eye);
@@ -173,14 +152,43 @@ public class DisplayManager {
         return new Vector(-fwd.getZ(), 0, fwd.getX()).normalize();
     }
 
+    private TextDisplay spawnDisplay(Player target) {
+        World w = target.getWorld();
+        Location pos = textPos(target);
+        return w.spawn(pos, TextDisplay.class, ent -> {
+            ent.setBillboard(Billboard.CENTER);      // カメラ正面
+            try { ent.setSeeThrough(false); } catch (Throwable ignore) {}
+            try { ent.setShadowed(true); } catch (Throwable ignore) {}
+            try { ent.setLineWidth(200); } catch (Throwable ignore) {}
+            try { ent.setDefaultBackground(false); } catch (Throwable ignore) {}
+            try { ent.setAlignment(TextDisplay.TextAlignment.CENTER); } catch (Throwable ignore) {}
+            setTextCompat(ent, "");                  // 初期は空
+            try { ent.setPersistent(false); } catch (Throwable ignore) {}
+            try { ent.setVisibleByDefault(false); } catch (Throwable ignore) {}
+        });
+    }
+
+    // setText(Component)/setText(String) のどちらでも動くように
+    private void setTextCompat(TextDisplay td, String plain) {
+        try {
+            var m = td.getClass().getMethod("setText", Component.class);
+            m.invoke(td, Component.text(plain));
+            return;
+        } catch (Throwable ignore) {}
+        try {
+            var m2 = td.getClass().getMethod("setText", String.class);
+            m2.invoke(td, plain);
+        } catch (Throwable ignore) {}
+    }
+
     // --- 表示テキスト ---
-    private List<String> buildEffectLines(Player target) {
+    public List<String> buildEffectLines(Player target) {
         List<String> out = new ArrayList<>();
         if (showPlayerName) out.add(target.getName());
 
         Collection<PotionEffect> effects = target.getActivePotionEffects();
         if (effects.isEmpty()) {
-            out.add("（効果なし）");
+            out.add(language != null && language.startsWith("ja") ? "（効果なし）" : "(No Effects)");
             return out;
         }
         for (PotionEffect eff : effects) {
@@ -193,44 +201,53 @@ public class DisplayManager {
         return out;
     }
 
-    private String effectName(PotionEffect eff) {
-        String key = eff.getType().getName();
+    public String effectName(PotionEffect eff) {
+        String raw = null;
+        try { raw = eff.getType().getKey().getKey(); } catch (Throwable ignore) {}
+        if (raw == null) { try { raw = eff.getType().getName(); } catch (Throwable ignore) {} }
+        if (raw == null) return "UNKNOWN";
+        String key = raw.toUpperCase(Locale.ROOT);
+
         switch (key) {
-            case "SPEED": return "移動速度";
-            case "SLOW": return "移動低下";
-            case "FAST_DIGGING": return "採掘速度";
-            case "SLOW_DIGGING": return "採掘低下";
-            case "INCREASE_DAMAGE": return "攻撃力上昇";
-            case "HEAL": return "即時回復";
-            case "HARM": return "即時ダメージ";
-            case "JUMP": return "跳躍力上昇";
-            case "REGENERATION": return "再生";
-            case "DAMAGE_RESISTANCE": return "耐性";
-            case "FIRE_RESISTANCE": return "耐火";
-            case "WATER_BREATHING": return "水中呼吸";
-            case "INVISIBILITY": return "透明化";
-            case "NIGHT_VISION": return "暗視";
-            case "HUNGER": return "空腹";
-            case "WEAKNESS": return "弱体化";
-            case "POISON": return "毒";
-            case "WITHER": return "衰弱";
-            case "HEALTH_BOOST": return "体力増強";
-            case "ABSORPTION": return "衝撃吸収";
-            case "SATURATION": return "満腹度回復";
-            case "GLOWING": return "発光";
-            case "LEVITATION": return "浮遊";
-            case "LUCK": return "幸運";
-            case "UNLUCK": return "不運";
-            case "CONDUIT_POWER": return "コンジットパワー";
-            case "DOLPHINS_GRACE": return "イルカの好意";
-            case "BAD_OMEN": return "不吉な予感";
-            case "HERO_OF_THE_VILLAGE": return "村の英雄";
-            default: return key;
+            case "SPEED": return ja("移動速度", "Speed");
+            case "SLOW": case "SLOWNESS": return ja("移動低下", "Slowness");
+            case "HASTE": case "FAST_DIGGING": return ja("採掘速度", "Haste");
+            case "MINING_FATIGUE": case "SLOW_DIGGING": return ja("採掘低下", "Mining Fatigue");
+            case "STRENGTH": case "INCREASE_DAMAGE": return ja("攻撃力上昇", "Strength");
+            case "INSTANT_HEALTH": case "HEAL": return ja("即時回復", "Instant Health");
+            case "INSTANT_DAMAGE": case "HARM": return ja("即時ダメージ", "Instant Damage");
+            case "JUMP_BOOST": case "JUMP": return ja("跳躍力上昇", "Jump Boost");
+            case "REGENERATION": return ja("再生", "Regeneration");
+            case "RESISTANCE": case "DAMAGE_RESISTANCE": return ja("耐性", "Resistance");
+            case "FIRE_RESISTANCE": return ja("耐火", "Fire Resistance");
+            case "WATER_BREATHING": return ja("水中呼吸", "Water Breathing");
+            case "INVISIBILITY": return ja("透明化", "Invisibility");
+            case "NIGHT_VISION": return ja("暗視", "Night Vision");
+            case "HUNGER": return ja("空腹", "Hunger");
+            case "WEAKNESS": return ja("弱体化", "Weakness");
+            case "POISON": return ja("毒", "Poison");
+            case "WITHER": return ja("衰弱", "Wither");
+            case "HEALTH_BOOST": return ja("体力増強", "Health Boost");
+            case "ABSORPTION": return ja("衝撃吸収", "Absorption");
+            case "SATURATION": return ja("満腹度回復", "Saturation");
+            case "GLOWING": return ja("発光", "Glowing");
+            case "LEVITATION": return ja("浮遊", "Levitation");
+            case "LUCK": return ja("幸運", "Luck");
+            case "UNLUCK": return ja("不運", "Unluck");
+            case "CONDUIT_POWER": return ja("コンジットパワー", "Conduit Power");
+            case "DOLPHINS_GRACE": return ja("イルカの好意", "Dolphin's Grace");
+            case "BAD_OMEN": return ja("不吉な予感", "Bad Omen");
+            case "HERO_OF_THE_VILLAGE": return ja("村の英雄", "Hero of the Village");
+            default: return raw;
         }
+    }
+
+    private String ja(String ja, String en) {
+        return language != null && language.startsWith("ja") ? ja : en;
     }
 
     private String roman(int n) {
         String[] r = {"","I","II","III","IV","V","VI","VII","VIII","IX","X"};
-        return n >= 0 && n < r.length ? r[n] : String.valueOf(n);
+        return (n >= 0 && n < r.length) ? r[n] : String.valueOf(n);
     }
 }

@@ -1,0 +1,37 @@
+plugins {
+    id 'java'
+    // 依存を同梱したい場合のみ:
+    // id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'com.noasaba'
+version = '1.1.1'
+description = 'OpenEffect'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://repo.papermc.io/repository/maven-public/' } // Paper
+}
+
+dependencies {
+    // サーバー提供 → provided 相当
+    compileOnly 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.processResources {
+    filteringCharset = 'UTF-8'
+}
+
+tasks.named('jar') {
+    archiveBaseName.set('OpenEffect')
+}
