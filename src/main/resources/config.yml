@@ -1,9 +1,13 @@
 includeSelfInAdminList: true
+
 language: ja
 showPlayerName: false
 
 updateTicks: 1
 hudUpdateTicks: 40
+updateOnMove: true
 
+# ここから下はプラグインが自動で埋めます
 enabledOverhead: []
 enabledHud: []
+enabledSelfOverhead: []

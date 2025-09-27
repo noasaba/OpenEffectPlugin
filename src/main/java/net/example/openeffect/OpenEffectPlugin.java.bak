@@ -123,9 +123,7 @@ public class OpenEffectPlugin extends JavaPlugin implements Listener, TabExecuto
                 }
             }, hudUpdateTicks, hudUpdateTicks);
 
-            getLogger().info("== === ==");
-            getLogger().info("OpenEffect v1.1.2 Developed by NOASABA (by PIARIS,nanosize)");
-            getLogger().info("== === ==");
+            getLogger().info("OpenEffect 1.1.2 enabled.");
         } catch (Throwable t) {
             getLogger().severe("Enable failed: " + t);
             t.printStackTrace();

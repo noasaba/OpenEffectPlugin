@@ -1,6 +1,6 @@
 name: OpenEffect
 main: net.example.openeffect.OpenEffectPlugin
-version: 1.1.1
+version: 1.1.2
 api-version: '1.20'
 
 commands:

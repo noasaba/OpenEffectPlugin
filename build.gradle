@@ -1,11 +1,11 @@
 plugins {
     id 'java'
-    // 依存を同梱したい場合のみ:
+    // 依存同梱が必要な場合のみ:
     // id 'com.github.johnrengelman.shadow' version '8.1.1'
 }
 
 group = 'com.noasaba'
-version = '1.1.1'
+version = '1.1.2'
 description = 'OpenEffect'
 
 java {
@@ -20,7 +20,6 @@ repositories {
 }
 
 dependencies {
-    // サーバー提供 → provided 相当
     compileOnly 'io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT'
 }
 

@@ -14,18 +14,19 @@ import java.util.*;
 
 /**
  * TextDisplay を使ってプレイヤー頭上に複数行の効果一覧を表示する。
- * - 1プレイヤーにつき TextDisplay を1体だけ保持（複数行は \n でまとめる）
- * - viewer ごとの showEntity/hideEntity を毎回再適用（トグルや再生成に強い）
- * - setText(Component) と setText(String) の両APIに自動対応（リフレクション）
- * - オフラインになったターゲットの表示は即 remove（残留バグ対策）
+ * - 1プレイヤーにつき TextDisplay を1体保持（複数行は \n に結合）
+ * - viewerごとの showEntity/hideEntity を都度適用（トグル・再生成に強い）
+ * - setText(Component)/setText(String) の両APIに自動対応
+ * - オフライン掃除で残留を防止
+ * - 「自分の頭上だけ非表示」のポリシーは OpenEffectPlugin#canSeeOwnOverhead を参照
  */
 public class DisplayManager {
 
     private final OpenEffectPlugin core;
 
-    // targetUUID -> TextDisplay
+    // targetUUID -> TextDisplay（表示される“所有者”）
     private final Map<UUID, TextDisplay> displays = new HashMap<>();
-    // 直近の描画内容（変化検知用）
+    // 直近の描画内容（変化検知）
     private final Map<UUID, String> lastText = new HashMap<>();
 
     // config
@@ -47,15 +48,14 @@ public class DisplayManager {
     // --- 管理 ---
     public void ensureAllTargets() {
         for (Player p : Bukkit.getOnlinePlayers()) ensureTarget(p);
-        // ついでにオフライン掃除（残留防止）
-        removeOfflineTargets();
+        removeOfflineTargets(); // 念のため掃除
     }
 
     public void ensureTarget(Player target) {
         if (target == null || !target.isOnline()) return;
         displays.computeIfAbsent(target.getUniqueId(), k -> {
             TextDisplay td = spawnDisplay(target);
-            reapplyVisibilityFor(td);
+            reapplyVisibilityFor(target.getUniqueId(), td);
             return td;
         });
         lastText.putIfAbsent(target.getUniqueId(), "");
@@ -63,7 +63,7 @@ public class DisplayManager {
 
     public void removeTarget(UUID targetId) {
         TextDisplay td = displays.remove(targetId);
-        if (td != null && !td.isDead()) td.remove();     // ← 実体を確実に消す
+        if (td != null && !td.isDead()) td.remove();
         lastText.remove(targetId);
     }
 
@@ -77,16 +77,14 @@ public class DisplayManager {
 
     private void removeOfflineTargets() {
         for (UUID id : new ArrayList<>(displays.keySet())) {
-            if (Bukkit.getPlayer(id) == null) {
-                removeTarget(id);                         // ← 残留バグの本丸
-            }
+            if (Bukkit.getPlayer(id) == null) removeTarget(id);
         }
     }
 
     // --- 更新 ---
     public void updateAll() {
         for (Player target : Bukkit.getOnlinePlayers()) updateOne(target);
-        removeOfflineTargets();                           // ← 定期掃除
+        removeOfflineTargets();
     }
 
     public void updateOne(Player target) {
@@ -102,7 +100,7 @@ public class DisplayManager {
         if (td == null || td.isDead()) {
             td = spawnDisplay(target);
             displays.put(id, td);
-            reapplyVisibilityFor(td);
+            reapplyVisibilityFor(id, td);
             lastText.put(id, "");
         }
 
@@ -111,22 +109,43 @@ public class DisplayManager {
             lastText.put(id, joined);
         }
 
-        // 位置追従
         td.teleport(textPos(target));
     }
 
-    /** viewer 単位の show/hide を即反映 */
-    public void applyVisibility(Player viewer, boolean show) {
-        for (TextDisplay td : displays.values()) {
+    /**
+     * viewer 単位で可視性ポリシーを再適用。
+     *  - Overhead 全体が OFF → 全非表示
+     *  - Overhead ON かつ「自分の頭上OFF」→ 自分の td だけ非表示、他は表示
+     *  - Overhead ON かつ「自分の頭上ON」→ すべて表示
+     */
+    public void applyVisibility(Player viewer) {
+        if (viewer == null || !viewer.isOnline()) return;
+        UUID vId = viewer.getUniqueId();
+        boolean seeOverhead = core.canSeeOverhead(viewer);
+        boolean seeSelf     = core.canSeeOwnOverhead(viewer); // 新ルール
+
+        for (Map.Entry<UUID, TextDisplay> e : displays.entrySet()) {
+            TextDisplay td = e.getValue();
             if (td == null || td.isDead()) continue;
+
+            boolean show = seeOverhead;
+            if (show && e.getKey().equals(vId) && !seeSelf) {
+                show = false; // 自分のだけ隠す
+            }
+
             if (show) viewer.showEntity(core, td);
             else viewer.hideEntity(core, td);
         }
     }
 
-    private void reapplyVisibilityFor(TextDisplay td) {
+    /** 新規/再生成した1体について、全 viewer に可視性を再適用 */
+    private void reapplyVisibilityFor(UUID ownerId, TextDisplay td) {
         for (Player v : Bukkit.getOnlinePlayers()) {
-            if (core.canSeeOverhead(v)) v.showEntity(core, td);
+            boolean show = core.canSeeOverhead(v);
+            if (show && ownerId.equals(v.getUniqueId()) && !core.canSeeOwnOverhead(v)) {
+                show = false;
+            }
+            if (show) v.showEntity(core, td);
             else v.hideEntity(core, td);
         }
     }
@@ -156,13 +175,13 @@ public class DisplayManager {
         World w = target.getWorld();
         Location pos = textPos(target);
         return w.spawn(pos, TextDisplay.class, ent -> {
-            ent.setBillboard(Billboard.CENTER);      // カメラ正面
+            ent.setBillboard(Billboard.CENTER);
             try { ent.setSeeThrough(false); } catch (Throwable ignore) {}
             try { ent.setShadowed(true); } catch (Throwable ignore) {}
             try { ent.setLineWidth(200); } catch (Throwable ignore) {}
             try { ent.setDefaultBackground(false); } catch (Throwable ignore) {}
             try { ent.setAlignment(TextDisplay.TextAlignment.CENTER); } catch (Throwable ignore) {}
-            setTextCompat(ent, "");                  // 初期は空
+            setTextCompat(ent, "");
             try { ent.setPersistent(false); } catch (Throwable ignore) {}
             try { ent.setVisibleByDefault(false); } catch (Throwable ignore) {}
         });
